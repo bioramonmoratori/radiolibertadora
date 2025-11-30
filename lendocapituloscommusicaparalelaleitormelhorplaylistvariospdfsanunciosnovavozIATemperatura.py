@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from meteostat import Point, Hourly
 import geocoder
 import sys
+import yt_dlp
 
 # Força saída UTF-8 no Windows
 if os.name == "nt":
@@ -324,6 +325,17 @@ def trocar_musica_fundo(musica_path, volume_musica=-20):
     except Exception as e:
         print(f"✗ Erro ao trocar música: {e}")
 
+def ajustar_volume_musica(volume_db):
+    """Ajusta o volume da música de fundo em tempo real"""
+    global musica_loop, canal_musica
+    if musica_loop and canal_musica:
+        volume_linear = db_para_linear(volume_db)
+        musica_loop.set_volume(volume_linear)
+
+def db_para_linear(db):
+    """Converte decibéis para escala linear (0.0 a 1.0)"""
+    return 10 ** (db / 20.0)
+
 
 def parar_musica_fundo():
     global canal_musica
@@ -468,9 +480,159 @@ def reproduzir_audio(arquivo):
     except Exception as e:
         print(f"✗ Erro reprodução: {e}")
 
+# ======================================================
+#     YOUTUBE - DOWNLOAD E PROCESSAMENTO
+# ======================================================
+
+def carregar_videos_youtube(csv_path='./repositorio/youtube.csv'):
+    """
+    Carrega lista de vídeos do YouTube de um CSV.
+    
+    Formato do CSV (sem cabeçalho):
+    URL,Título (opcional)
+    
+    Exemplo:
+    https://www.youtube.com/watch?v=dQw4w9WgXcQ,Música Exemplo
+    https://youtu.be/abc123xyz,Palestra Interessante
+    """
+    if not os.path.exists(csv_path):
+        print(f"⚠ Arquivo {csv_path} não encontrado")
+        return []
+    
+    videos = []
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if row and row[0].strip():
+                    url = row[0].strip()
+                    titulo = row[1].strip() if len(row) > 1 else None
+                    videos.append({'url': url, 'titulo': titulo})
+        
+        print(f"✓ {len(videos)} vídeos carregados do CSV")
+        return videos
+    
+    except Exception as e:
+        print(f"✗ Erro ao ler CSV do YouTube: {e}")
+        return []
+
+
+def baixar_audio_youtube(url, pasta_destino='./repositorio/youtube_audios'):
+    """
+    Baixa apenas o áudio de um vídeo do YouTube.
+    
+    Retorna: dicionário com informações do vídeo ou None em caso de erro
+    """
+    if not os.path.exists(pasta_destino):
+        os.makedirs(pasta_destino)
+    
+    # Configurações do yt-dlp
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': os.path.join(pasta_destino, '%(id)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"⬇️  Baixando áudio de: {url}")
+            info = ydl.extract_info(url, download=True)
+            
+            video_id = info['id']
+            titulo = info.get('title', 'Sem título')
+            duracao = info.get('duration', 0)
+            
+            # Caminho do arquivo baixado
+            audio_path = os.path.join(pasta_destino, f"{video_id}.mp3")
+            
+            if os.path.exists(audio_path):
+                print(f"✓ Áudio baixado: {titulo}")
+                return {
+                    'titulo': titulo,
+                    'arquivo': audio_path,
+                    'duracao': duracao,
+                    'url': url,
+                    'video_id': video_id
+                }
+            else:
+                print(f"✗ Erro: arquivo não encontrado após download")
+                return None
+    
+    except Exception as e:
+        print(f"✗ Erro ao baixar {url}: {e}")
+        return None
+
+
+def processar_videos_youtube(csv_path='./repositorio/youtube.csv'):
+    """
+    Processa todos os vídeos do CSV e retorna lista de capítulos de áudio.
+    Não baixa vídeos que já existem localmente.
+    """
+    videos = carregar_videos_youtube(csv_path)
+    if not videos:
+        return []
+    
+    pasta_destino = './repositorio/youtube_audios'
+    capitulos_youtube = []
+    
+    print("\n" + "="*50)
+    print("  🎥 PROCESSANDO VÍDEOS DO YOUTUBE")
+    print("="*50)
+    
+    for video in videos:
+        url = video['url']
+        titulo_custom = video['titulo']
+        
+        # Extrai ID do vídeo sem baixar
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                video_id = info['id']
+                titulo_video = info.get('title', 'Sem título')
+                
+                # Usa título customizado se disponível
+                titulo_final = titulo_custom if titulo_custom else titulo_video
+                
+                # Verifica se já existe
+                audio_path = os.path.join(pasta_destino, f"{video_id}.mp3")
+                
+                if os.path.exists(audio_path):
+                    print(f"✓ Já existe: {titulo_final}")
+                    capitulos_youtube.append({
+                        'tipo': 'youtube',
+                        'titulo': titulo_final,
+                        'arquivo': audio_path,
+                        'url': url,
+                        'arquivo_origem': 'YouTube'
+                    })
+                else:
+                    # Baixa o áudio
+                    resultado = baixar_audio_youtube(url, pasta_destino)
+                    if resultado:
+                        capitulos_youtube.append({
+                            'tipo': 'youtube',
+                            'titulo': titulo_final,
+                            'arquivo': resultado['arquivo'],
+                            'url': url,
+                            'arquivo_origem': 'YouTube'
+                        })
+        
+        except Exception as e:
+            print(f"✗ Erro ao processar {url}: {e}")
+            continue
+    
+    print(f"\n✓ {len(capitulos_youtube)} vídeos do YouTube prontos\n")
+    return capitulos_youtube
+
 
 # ======================================================
-#     LEITOR COMPLETO MULTI-ARQUIVOS
+#     LEITOR COMPLETO (ATUALIZADO COM YOUTUBE)
 # ======================================================
 
 def ler_repositorio_com_musica(
@@ -479,7 +641,8 @@ def ler_repositorio_com_musica(
         idioma='pt-br',
         velocidade=1.3,
         ordem_aleatoria=True,
-        volume_musica=-20):
+        volume_musica=-20,
+        incluir_youtube=True):
 
     print("\n" + "="*50)
     print("  📚 RÁDIO LIBERTADORA - REPOSITÓRIO COMPLETO")
@@ -495,15 +658,12 @@ def ler_repositorio_com_musica(
         random.shuffle(musicas)
         print("🔀 Músicas em ordem aleatória\n")
 
-    # Carrega arquivos do repositório
+    # Carrega arquivos do repositório (PDFs/TXTs)
     arquivos = carregar_arquivos_repositorio(pasta_repositorio)
-    if not arquivos:
-        print("✗ Nenhum arquivo encontrado. Abortando.")
-        return
-
-    # Processa todos os arquivos e coleta capítulos
+    
+    # Processa arquivos de texto e coleta capítulos
     print("\n" + "="*50)
-    print("  📖 PROCESSANDO ARQUIVOS")
+    print("  📖 PROCESSANDO ARQUIVOS DE TEXTO")
     print("="*50)
     
     todos_capitulos = []
@@ -512,16 +672,25 @@ def ler_repositorio_com_musica(
         capitulos = processar_arquivo(arquivo)
         todos_capitulos.extend(capitulos)
     
+    print(f"\n📚 Total: {len(todos_capitulos)} capítulos de texto")
+    
+    # Adiciona vídeos do YouTube
+    if incluir_youtube:
+        csv_youtube = os.path.join(pasta_repositorio, 'youtube.csv')
+        capitulos_youtube = processar_videos_youtube(csv_youtube)
+        todos_capitulos.extend(capitulos_youtube)
+        print(f"🎥 Total: {len(capitulos_youtube)} vídeos do YouTube")
+    
     if not todos_capitulos:
-        print("✗ Nenhum capítulo encontrado em nenhum arquivo")
+        print("✗ Nenhum conteúdo encontrado")
         return
     
-    print(f"\n📚 Total: {len(todos_capitulos)} capítulos de {len(arquivos)} arquivos")
+    print(f"\n🎯 TOTAL GERAL: {len(todos_capitulos)} itens para reprodução")
     
     # Embaralha capítulos se modo aleatório
     if ordem_aleatoria:
         random.shuffle(todos_capitulos)
-        print("🔀 Capítulos em ordem aleatória\n")
+        print("🔀 Conteúdo em ordem aleatória\n")
 
     # Inicia reprodução
     try:
@@ -531,8 +700,8 @@ def ler_repositorio_com_musica(
             musica_atual = musicas[(i - 1) % len(musicas)]
             
             print(f"\n" + "="*50)
-            print(f"📖 [{i}/{len(todos_capitulos)}] {cap['titulo']}")
-            print(f"📚 Livro: {cap['arquivo_origem']}")
+            print(f"📻 [{i}/{len(todos_capitulos)}] {cap['titulo']}")
+            print(f"📚 Fonte: {cap['arquivo_origem']}")
             print("="*50)
             
             # Troca música
@@ -543,13 +712,6 @@ def ler_repositorio_com_musica(
                 trocar_musica_fundo(musica_atual, volume_musica)
             
             time.sleep(0.5)
-            # print("\n"
-            # "█████████████████████████████████████████████████████████████████████████████████████████████\n"
-            # "█▄─▄▄▀██▀▄─██▄─▄▄▀█▄─▄█─▄▄─███▄─▄███▄─▄█▄─▄─▀█▄─▄▄─█▄─▄▄▀█─▄─▄─██▀▄─██▄─▄▄▀█─▄▄─█▄─▄▄▀██▀▄─██\n"
-            # "██─▄─▄██─▀─███─██─██─██─██─████─██▀██─███─▄─▀██─▄█▀██─▄─▄███─████─▀─███─██─█─██─██─▄─▄██─▀─██\n"
-            # "▀▄▄▀▄▄▀▄▄▀▄▄▀▄▄▄▄▀▀▄▄▄▀▄▄▄▄▀▀▀▄▄▄▄▄▀▄▄▄▀▄▄▄▄▀▀▄▄▄▄▄▀▄▄▀▄▄▀▀▄▄▄▀▀▄▄▀▄▄▀▄▄▄▄▀▀▄▄▄▄▀▄▄▀▄▄▀▄▄▀▄▄▀\n"
-            # "█████████████████████████████████████████████████████████████████████████████████████████████\n")
-            # print("\n\n")
 
             print(f"░░█▀▀▀▀▀▀▀▀▀▀▀▀▀▀█\n"
                 "██▀▀▀██▀▀▀▀▀▀██▀▀▀██\n"
@@ -557,41 +719,74 @@ def ler_repositorio_com_musica(
                 "█▒▒▒▒▒█▒████▒█▒▒▒▒▒█\n"
                 "██▄▄▄██▄▄▄▄▄▄██▄▄▄██\n")
 
-            # Anúncio de início
-            anuncio_inicio = f"Livro {cap['arquivo_origem']}, trecho {cap['titulo']}."
-            print(f"🔊 Anunciando capítulo...")
+            # Verifica se é YouTube ou texto
+            if cap.get('tipo') == 'youtube':
+                # Conteúdo do YouTube - reproduz o áudio direto
+                anuncio_inicio = f"Áudio do vídeo: {cap['titulo']}"
+                print(f"🔊 Anunciando vídeo...")
+                
+                audio_anuncio = texto_para_audio(anuncio_inicio, idioma, 1.3)
+                if audio_anuncio:
+                    time.sleep(3.0)
+                    reproduzir_audio(audio_anuncio)
+                    time.sleep(0.3)
+                    try:
+                        os.remove(audio_anuncio)
+                    except:
+                        pass
+                
+                # Silencia música de fundo durante o YouTube
+                print(f"🔇 Silenciando música de fundo...")
+                ajustar_volume_musica(-40)
+                
+                # Reproduz áudio do YouTube
+                print(f"▶️  Reproduzindo áudio do YouTube...")
+                reproduzir_audio(cap['arquivo'])
+                
+                # Restaura volume da música de fundo
+                print(f"🔊 Restaurando música de fundo...")
+                ajustar_volume_musica(volume_musica)
+                
+                # Anúncio de encerramento
+                anuncio_fim = f"Este foi o vídeo: {cap['titulo']}"
+                
+            else:
+                # Conteúdo de texto (como antes)
+                anuncio_inicio = f"Livro {cap['arquivo_origem']}, trecho {cap['titulo']}."
+                print(f"🔊 Anunciando capítulo...")
+                
+                audio_anuncio = texto_para_audio(anuncio_inicio, idioma, 1.3)
+                if audio_anuncio:
+                    time.sleep(3.0)
+                    reproduzir_audio(audio_anuncio)
+                    time.sleep(0.3)
+                    try:
+                        os.remove(audio_anuncio)
+                    except:
+                        pass
+
+                # Leitura do conteúdo
+                print(f"📢 Lendo conteúdo ({len(cap['texto'])} caracteres)...")
+                audio_cap = texto_para_audio(cap['texto'], idioma, velocidade)
+
+                if audio_cap:
+                    reproduzir_audio(audio_cap)
+                    time.sleep(0.3)
+                    try:
+                        os.remove(audio_cap)
+                    except:
+                        pass
+
+                anuncio_fim = f"Este foi o trecho do livro {cap.get('numero', '')}, {cap['titulo']}. Do livro {cap['arquivo_origem']}."
             
-            audio_anuncio = texto_para_audio(anuncio_inicio, idioma, 1.3)
-            if audio_anuncio:
-                time.sleep(3.0)
-                reproduzir_audio(audio_anuncio)
-                time.sleep(0.3)
-                try:
-                    os.remove(audio_anuncio)
-                except:
-                    pass
-
-            # Leitura do conteúdo
-            print(f"📢 Lendo conteúdo ({len(cap['texto'])} caracteres)...")
-            audio_cap = texto_para_audio(cap['texto'], idioma, velocidade)
-
-            if audio_cap:
-                reproduzir_audio(audio_cap)
-                time.sleep(0.3)
-                try:
-                    os.remove(audio_cap)
-                except:
-                    pass
-
-            # Anúncio de encerramento
-            anuncio_fim = f"Este foi o trecho do livro {cap['numero']}, {cap['titulo']}. Do livro {cap['arquivo_origem']}."
-            print(f"✅ Encerrando capítulo...")
+            print(f"✅ Encerrando item...")
             
             audio_fim = texto_para_audio(anuncio_fim, idioma, 1.3)
             if audio_fim:
                 reproduzir_audio(audio_fim)
                 time.sleep(7.0)
-                # pega a hora atual para inserir no áudio
+                
+                # Hora atual
                 agora = datetime.now()
                 reproduzir_audio(texto_para_audio(f"{agora.hour} horas e {agora.minute} minutos", idioma, 1.3))
                 time.sleep(1.0)
@@ -600,40 +795,40 @@ def ler_repositorio_com_musica(
                 reproduzir_audio(texto_para_audio("Rádio Libertadora. A sua rádio pessoal de liberdade e conhecimento!", idioma, 1.3))
                 time.sleep(15.0)
 
-                # Anuncios
-                # Baixa CSV de anuncios e seleciona um aleatório
-                arquivo = csv.reader(open('./anuncios/anuncios.csv', 'r', encoding='utf-8'))
-                anuncios_lista = [row[0] for row in arquivo if row]
-                anuncio_aleatorio = random.choice(anuncios_lista) if anuncios_lista else None
+                # Anúncios
+                try:
+                    arquivo = csv.reader(open('./anuncios/anuncios.csv', 'r', encoding='utf-8'))
+                    anuncios_lista = [row[0] for row in arquivo if row]
+                    anuncio_aleatorio = random.choice(anuncios_lista) if anuncios_lista else None
 
-                if anuncio_aleatorio:
-                    reproduzir_audio(texto_para_audio(anuncio_aleatorio, idioma, 1.3))
-                    time.sleep(5.0)
-                    reproduzir_audio(texto_para_audio("Você está ouvindo a Rádio Libertadora!", idioma, 1.3))
-                    time.sleep(3.0)
+                    if anuncio_aleatorio:
+                        reproduzir_audio(texto_para_audio(anuncio_aleatorio, idioma, 1.3))
+                        time.sleep(5.0)
+                        reproduzir_audio(texto_para_audio("Você está ouvindo a Rádio Libertadora!", idioma, 1.3))
+                        time.sleep(3.0)
+                except:
+                    pass
                 
-                reproduzir_audio(texto_para_audio("Fique agora com outro capítulo de um livro aleatório do seu repositório de textos!", idioma, 1.3))
+                reproduzir_audio(texto_para_audio("Fique agora com outro conteúdo aleatório do seu repositório!", idioma, 1.3))
                 time.sleep(3.0)
                 try:
                     os.remove(audio_fim)
                 except:
                     pass
 
-            print(f"✓ Capítulo {i} concluído")
-            #Limpa tela
+            print(f"✓ Item {i} concluído")
             os.system('cls' if os.name == 'nt' else 'clear')
 
     except KeyboardInterrupt:
-        print("\n\n⏸️  Leitura interrompida pelo usuário")
+        print("\n\n⏸️  Reprodução interrompida pelo usuário")
     except Exception as e:
-        print(f"\n✗ Erro durante leitura: {e}")
+        print(f"\n✗ Erro durante reprodução: {e}")
     finally:
         print("\n🎵 Encerrando música...")
         parar_musica_fundo()
         time.sleep(0.5)
 
-    print("\n✨ Leitura concluída!\n")
-
+    print("\n✨ Reprodução concluída!\n")
 
 def pegar_localizacao():
     g = geocoder.ip('me')
@@ -660,15 +855,13 @@ def temperatura_agora():
     return f"Agora fazem {temperatura:.1f}°C em {geocoder.ip('me').city}."
 
 # ======================================================
-#     MAIN
+#     MAIN (ATUALIZADO)
 # ======================================================
 
 if __name__ == "__main__":
 
-    pasta_repositorio = "./repositorio"  # Pasta com PDFs e TXTs
+    pasta_repositorio = "./repositorio"  # Pasta com PDFs, TXTs e youtube.csv
     pasta_playlist = "./playlist"        # Pasta com as músicas
-
-    # Exemplo de uso: Vancouver
     
     ler_repositorio_com_musica(
         pasta_repositorio,
@@ -676,5 +869,6 @@ if __name__ == "__main__":
         idioma='pt-br',
         velocidade=1.3,
         ordem_aleatoria=True,
-        volume_musica=-10
+        volume_musica=-10,
+        incluir_youtube=True  # Ativa inclusão de vídeos do YouTube
     )
